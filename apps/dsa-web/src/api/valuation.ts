@@ -43,6 +43,63 @@ export interface GetPeHistoryOptions {
   signal?: AbortSignal;
 }
 
+export interface MarketCapPoint {
+  date: string;
+  value: number;
+}
+
+export interface RevenuePoint {
+  date: string;
+  year: string;
+  value: number;
+}
+
+export interface FundamentalsResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  currency: string;
+  unit: string;
+  message: string | null;
+  marketCap: MarketCapPoint[];
+  revenue: RevenuePoint[];
+}
+
+export interface GetFundamentalsParams {
+  years?: number;
+}
+
+// 注意：后端返回 snake_case，经 toCamelCase(deep) 后这些键会变为驼峰形式。
+export type MetricKey =
+  | 'grossMargin'
+  | 'debtRatio'
+  | 'dividendYield'
+  | 'roe'
+  | 'deductedNetProfit'
+  | 'freeCashFlow';
+
+export interface MetricPoint {
+  year: string;
+  value: number;
+}
+
+export interface MetricSeries {
+  kind: 'line' | 'bar';
+  unit: string;
+  points: MetricPoint[];
+}
+
+export interface MetricsResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  currency: string;
+  message: string | null;
+  metrics: Partial<Record<MetricKey, MetricSeries>>;
+}
+
 export const valuationApi = {
   /**
    * 获取个股历史 PE 走势与正态分布估值参考线。
@@ -59,5 +116,37 @@ export const valuationApi = {
       signal: options.signal,
     });
     return toCamelCase<PeHistoryResponse>(response.data);
+  },
+
+  /**
+   * 获取总营收（年度）与总市值（日频）组合数据。
+   */
+  getFundamentals: async (
+    code: string,
+    params: GetFundamentalsParams = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<FundamentalsResponse> => {
+    const { years = 20 } = params;
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/fundamentals', {
+      params: { code, years },
+      signal: options.signal,
+    });
+    return toCamelCase<FundamentalsResponse>(response.data);
+  },
+
+  /**
+   * 获取扩展财务指标（毛利率/资产负债率/股息率/ROE/扣非净利润/自由现金流，年度）。
+   */
+  getMetrics: async (
+    code: string,
+    params: GetFundamentalsParams = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<MetricsResponse> => {
+    const { years = 20 } = params;
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/metrics', {
+      params: { code, years },
+      signal: options.signal,
+    });
+    return toCamelCase<MetricsResponse>(response.data);
   },
 };
