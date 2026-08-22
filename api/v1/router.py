@@ -26,6 +26,7 @@ from api.v1.endpoints import (
     stocks,
     system_config,
     usage,
+    valuation,
 )
 
 # 创建 v1 版本主路由。
@@ -113,4 +114,10 @@ router.include_router(
 router.include_router(
     health.router,
     tags=["Health"]
+)
+
+router.include_router(
+    valuation.router,
+    prefix="/valuation",
+    tags=["Valuation"]
 )
