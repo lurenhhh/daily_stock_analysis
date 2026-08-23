@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, BarChart3, Bell, BriefcaseBusiness, Gauge, Home, LogOut, MessageSquareQuote, Search, Settings2, TrendingUp } from 'lucide-react';
-import { NavLink } from 'react-router-dom';
+import { Activity, BarChart3, Bell, BriefcaseBusiness, ChevronDown, Folder, Gauge, Home, LayoutDashboard, LogOut, MessageSquareQuote, Search, Settings2, TrendingUp } from 'lucide-react';
+import { NavLink, useLocation } from 'react-router-dom';
 import { SCREENING_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, screeningApi } from '../../api/screening';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAgentChatStore } from '../../stores/agentChatStore';
@@ -25,11 +25,13 @@ type NavItem = {
   icon: React.ComponentType<{ className?: string }>;
   exact?: boolean;
   badge?: 'completion';
+  group?: UiTextKey;
 };
 
 const NAV_ITEMS: NavItem[] = [
   { key: 'home', labelKey: 'layout.nav.home', to: '/', icon: Home, exact: true },
-  { key: 'valuation', labelKey: 'layout.nav.valuation', to: '/valuation', icon: TrendingUp },
+  { key: 'valuation', labelKey: 'layout.nav.valuation', to: '/valuation', icon: TrendingUp, group: 'layout.navGroup.myAnalysis' },
+  { key: 'my-dashboard', labelKey: 'layout.nav.myDashboard', to: '/my-dashboard', icon: LayoutDashboard, group: 'layout.navGroup.myAnalysis' },
   { key: 'chat', labelKey: 'layout.nav.chat', to: '/chat', icon: MessageSquareQuote, badge: 'completion' },
   { key: 'screening', labelKey: 'layout.nav.screening', to: '/screening', icon: Search },
   { key: 'portfolio', labelKey: 'layout.nav.portfolio', to: '/portfolio', icon: BriefcaseBusiness },
@@ -46,6 +48,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
   const completionBadge = useAgentChatStore((state) => state.completionBadge);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [showScreeningNav, setShowScreeningNav] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const location = useLocation();
 
   useEffect(() => {
     let active = true;
@@ -92,6 +96,22 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
   const itemIconClass = cn(isRail ? 'h-[18px] w-[18px]' : 'h-5 w-5', 'shrink-0');
   const itemLabelClass = cn('truncate', isRail ? 'text-center' : '');
 
+  const activePath = location.pathname;
+  const isItemActive = (to: string, exact?: boolean) =>
+    exact ? activePath === to : activePath === to || activePath.startsWith(`${to}/`);
+  const groupHasActive = (groupKey: string) =>
+    navItems.some((navItem) => navItem.group === groupKey && isItemActive(navItem.to, navItem.exact));
+  const toggleGroup = (groupKey: string) =>
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+
   return (
     <div className="flex h-full flex-col">
       <div
@@ -115,41 +135,67 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
       </div>
 
       <nav className={cn('flex flex-col gap-1.5', isRail ? '' : 'flex-1')} aria-label={t('layout.mainNav')}>
-        {navItems.map(({ key, labelKey, to, icon: Icon, exact, badge }) => {
+        {navItems.map((item, index) => {
+          const { key, labelKey, to, icon: Icon, exact, badge, group } = item;
           const label = t(labelKey);
+          const showGroup = !collapsed;
+          const isGroupStart = !!group && group !== navItems[index - 1]?.group;
+          const groupOpen = !group || !collapsedGroups.has(group) || groupHasActive(group);
+          const hideItem = !!group && showGroup && !groupOpen;
+
+          const navLink = (
+            <NavLink
+              to={to}
+              end={exact}
+              onClick={onNavigate}
+              aria-label={label}
+              className={({ isActive }) => cn(itemInteractiveClass, isActive ? itemActiveClass : '')}
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon className={cn(itemIconClass, isActive ? 'text-[var(--nav-icon-active)]' : 'text-current')} />
+                  {!collapsed ? <span className={itemLabelClass}>{label}</span> : null}
+                  {badge === 'completion' && completionBadge ? (
+                    <StatusDot
+                      tone="info"
+                      data-testid="chat-completion-badge"
+                      className={cn(
+                        'absolute right-3 border-2 border-background shadow-[0_0_10px_var(--nav-indicator-shadow)]',
+                        collapsed ? 'right-2 top-2' : ''
+                      )}
+                      aria-label={t('layout.newChatMessage')}
+                    />
+                  ) : null}
+                </>
+              )}
+            </NavLink>
+          );
+
           return (
-          <NavLink
-            key={key}
-            to={to}
-            end={exact}
-            onClick={onNavigate}
-            aria-label={label}
-            className={({ isActive }) =>
-              cn(
-                itemInteractiveClass,
-                isActive ? itemActiveClass : ''
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <Icon className={cn(itemIconClass, isActive ? 'text-[var(--nav-icon-active)]' : 'text-current')} />
-                {!collapsed ? <span className={itemLabelClass}>{label}</span> : null}
-                {badge === 'completion' && completionBadge ? (
-                  <StatusDot
-                    tone="info"
-                    data-testid="chat-completion-badge"
-                    className={cn(
-                      'absolute right-3 border-2 border-background shadow-[0_0_10px_var(--nav-indicator-shadow)]',
-                      collapsed ? 'right-2 top-2' : ''
-                    )}
-                    aria-label={t('layout.newChatMessage')}
-                  />
-                ) : null}
-              </>
-            )}
-          </NavLink>
-        );
+            <React.Fragment key={key}>
+              {isGroupStart && showGroup && group ? (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group)}
+                  aria-expanded={groupOpen}
+                  className={cn(itemInteractiveClass, 'justify-between')}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Folder className={itemIconClass} />
+                    <span className={itemLabelClass}>{t(group)}</span>
+                  </span>
+                  <ChevronDown className={cn('h-4 w-4 shrink-0 transition-transform', groupOpen ? '' : '-rotate-90')} />
+                </button>
+              ) : null}
+              {hideItem ? null : group && showGroup ? (
+                <div className={cn('border-l border-[var(--nav-hover-bg)]', isRail ? 'ml-1.5 pl-1' : 'ml-4 pl-2')}>
+                  {navLink}
+                </div>
+              ) : (
+                navLink
+              )}
+            </React.Fragment>
+          );
         })}
 
         <ThemeToggle

@@ -101,3 +101,31 @@ class MetricsResponse(BaseModel):
     currency: str = Field(..., description="计价货币")
     message: Optional[str] = Field(None, description="补充说明")
     metrics: Dict[str, MetricSeries] = Field(default_factory=dict, description="指标键 -> 年度序列")
+
+
+class DcfScenario(BaseModel):
+    """某个参数的三档情景参考值：悲观 / 中等 / 乐观。"""
+
+    bear: float = Field(..., description="悲观")
+    base: float = Field(..., description="中等")
+    bull: float = Field(..., description="乐观")
+
+
+class DcfReferenceResponse(BaseModel):
+    """DCF（现金流折现）估值的「按公司」参考值（每个参数含三档情景）。"""
+
+    code: str = Field(..., description="规范化后的股票代码")
+    display_code: str = Field(..., description="用于展示的原始/精简代码")
+    market: str = Field(..., description="市场标签")
+    supported: bool = Field(..., description="是否可提供参考（至少有当前市值）")
+    currency: str = Field(..., description="计价货币")
+    market_cap: Optional[float] = Field(None, description="当前总市值（亿，用于对比）")
+    price: Optional[float] = Field(None, description="当前股价（本币/股）")
+    fcf: Optional[DcfScenario] = Field(None, description="自由现金流参考（亿）")
+    discount: Optional[DcfScenario] = Field(None, description="折现率参考（%）")
+    growth: Optional[DcfScenario] = Field(None, description="高速增长率参考（%）")
+    years: Optional[DcfScenario] = Field(None, description="高速增长年数参考")
+    perpetual: Optional[DcfScenario] = Field(None, description="永续增长率参考（%）")
+    source: str = Field("heuristic", description="参考值来源：llm / heuristic")
+    rationale: Optional[str] = Field(None, description="LLM 给出的简短依据")
+    message: Optional[str] = Field(None, description="补充说明")

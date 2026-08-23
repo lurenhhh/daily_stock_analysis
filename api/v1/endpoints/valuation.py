@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query
 
 from api.v1.schemas.valuation import (
+    DcfReferenceResponse,
     FundamentalsResponse,
     MetricsResponse,
     PeHistoryResponse,
@@ -651,6 +652,74 @@ def _fetch_free_cash_flow(code: str) -> List[Tuple[str, float]]:
     return out
 
 
+def _fetch_dividend_yield(code: str) -> List[Tuple[str, float]]:
+    """A 股年度股息率(%) = 当年每股现金分红 / 当年年末收盘价 × 100。
+
+    - 每股现金分红：新浪分红明细「派息」为每 10 股派息(元)，按除权除息日所在年份累加后 / 10。
+    - 年末收盘价：东财月线不复权收盘，取每年最后一条。
+    """
+    import akshare as ak
+
+    symbol = "".join(ch for ch in normalize_stock_code(code) if ch.isdigit())[:6]
+    if not symbol:
+        return []
+
+    # 1) 每股现金分红（按年）
+    dps_by_year: Dict[str, float] = {}
+    div_df = ak.stock_history_dividend_detail(symbol=symbol, indicator="分红")
+    if div_df is not None and not getattr(div_df, "empty", True):
+        for row in div_df.to_dict(orient="records"):
+            try:
+                pay = float(row.get("派息"))
+            except (TypeError, ValueError):
+                continue
+            if not pay or pay <= 0 or math.isnan(pay):
+                continue
+            ex_str = str(row.get("除权除息日"))
+            if len(ex_str) < 4 or not ex_str[:4].isdigit():
+                continue
+            year = ex_str[:4]
+            dps_by_year[year] = dps_by_year.get(year, 0.0) + pay / 10.0
+
+    if not dps_by_year:
+        return []
+
+    # 2) 年末收盘价（新浪日线不复权，每年最后一个交易日）
+    #    注：改用新浪而非东财，避免部分网络/代理环境无法访问东财行情域名。
+    if symbol[0] in ("6", "9"):
+        sina_symbol = f"sh{symbol}"
+    elif symbol.startswith(("4", "8")) or symbol.startswith("92"):
+        sina_symbol = f"bj{symbol}"
+    else:
+        sina_symbol = f"sz{symbol}"
+
+    yearend_close: Dict[str, float] = {}
+    hist = ak.stock_zh_a_daily(
+        symbol=sina_symbol, start_date="20000101", end_date="20261231", adjust=""
+    )
+    if hist is not None and not getattr(hist, "empty", True):
+        date_col = "date" if "date" in hist.columns else hist.columns[0]
+        close_col = "close" if "close" in hist.columns else "收盘"
+        for row in hist.to_dict(orient="records"):
+            date_str = str(row.get(date_col))
+            if len(date_str) < 4 or not date_str[:4].isdigit():
+                continue
+            try:
+                close = float(row.get(close_col))
+            except (TypeError, ValueError):
+                continue
+            if close > 0:
+                yearend_close[date_str[:4]] = close  # 升序遍历，最后写入即年末
+
+    out: List[Tuple[str, float]] = []
+    for year, dps in dps_by_year.items():
+        close = yearend_close.get(year)
+        if close and close > 0:
+            out.append((year, round(dps / close * 100.0, 2)))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
 def _load_metrics(market: str, code: str) -> Dict[str, List[Tuple[str, float]]]:
     """带缓存地加载扩展财务指标（仅 A 股）。"""
     cache_key = f"metrics:{market}:{normalize_stock_code(code).upper()}"
@@ -676,6 +745,12 @@ def _load_metrics(market: str, code: str) -> Dict[str, List[Tuple[str, float]]]:
                 metrics["free_cash_flow"] = fcf
         except Exception as exc:  # noqa: BLE001 - 尽力支持
             logger.warning("[Valuation] fcf failed for %s: %s", code, exc)
+        try:
+            dividend = _fetch_dividend_yield(code)
+            if dividend:
+                metrics["dividend_yield"] = dividend
+        except Exception as exc:  # noqa: BLE001 - 尽力支持
+            logger.warning("[Valuation] dividend yield failed for %s: %s", code, exc)
 
     with _CACHE_LOCK:
         _CACHE[cache_key] = (now, {"metrics": metrics})
@@ -744,4 +819,443 @@ def get_metrics(
         currency=currency,
         message=message,
         metrics=metrics,
+    )
+
+
+# ============================================================================
+# DCF（现金流折现）估值：按选中公司给出参考值（当前市值、FCF、增长率等）
+# 计算本身在前端进行，这里只提供「合理参考值」。
+# ============================================================================
+
+
+def _sina_symbol(code: str) -> str:
+    """A 股 6 位代码转新浪代码，如 600519 -> sh600519。"""
+    digits = "".join(ch for ch in normalize_stock_code(code) if ch.isdigit())[:6]
+    if not digits:
+        return ""
+    if digits[0] in ("6", "9"):
+        return f"sh{digits}"
+    if digits.startswith(("4", "8")) or digits.startswith("92"):
+        return f"bj{digits}"
+    return f"sz{digits}"
+
+
+def _latest_market_cap_yi(market: str, code: str) -> Optional[float]:
+    """当前总市值（亿，本币），来自百度估值最新值。"""
+    series = _fetch_baidu(market, code, "总市值")
+    if not series:
+        return None
+    factor = _amount_to_yi_factor([v for _, v in series]) or 1.0
+    return round(series[-1][1] / factor, 2)
+
+
+def _latest_price_sina(code: str) -> Optional[float]:
+    """当前股价（本币/股）：新浪日线最近一个交易日不复权收盘。"""
+    import akshare as ak
+
+    sina = _sina_symbol(code)
+    if not sina:
+        return None
+    df = ak.stock_zh_a_daily(symbol=sina, start_date="20230101", end_date="20261231", adjust="")
+    if df is None or getattr(df, "empty", True):
+        return None
+    columns = list(df.columns)
+    date_col = "date" if "date" in columns else columns[0]
+    close_col = "close" if "close" in columns else "收盘"
+    last: Optional[float] = None
+    for row in df.to_dict(orient="records"):
+        _ = row.get(date_col)
+        try:
+            close = float(row.get(close_col))
+        except (TypeError, ValueError):
+            continue
+        if close > 0:
+            last = close
+    return round(last, 2) if last else None
+
+
+def _revenue_cagr_pct(code: str) -> Optional[float]:
+    """历史营收 CAGR（%），取最近至多 5 个年度，钳制到 [0, 30]。"""
+    revenue = _fetch_revenue_cn(code)  # [(date, year, 亿)]
+    points = [(y, v) for _, y, v in revenue if v and v > 0]
+    if len(points) < 2:
+        return None
+    points.sort(key=lambda item: item[0])
+    window = points[-6:] if len(points) > 6 else points
+    first = window[0][1]
+    last = window[-1][1]
+    span = len(window) - 1
+    if first <= 0 or span <= 0:
+        return None
+    cagr = (last / first) ** (1.0 / span) - 1.0
+    pct = round(cagr * 100.0, 1)
+    return max(0.0, min(30.0, pct))
+
+
+def _fcf_scenarios_sina(code: str) -> Optional[Dict[str, float]]:
+    """自由现金流三档情景（亿）：base=最近一年，bear=近年最小，bull=近年最大。
+
+    FCF = 经营活动现金流量净额 - 购建长期资产支付的现金。
+    数据源：新浪现金流量表（避开被部分网络拦截的东财域名）。
+    """
+    import akshare as ak
+
+    sina = _sina_symbol(code)
+    if not sina:
+        return None
+    df = ak.stock_financial_report_sina(stock=sina, symbol="现金流量表")
+    if df is None or getattr(df, "empty", True):
+        return None
+
+    columns = [str(c) for c in df.columns]
+    date_col = "报告日" if "报告日" in columns else columns[0]
+    op_col = next((c for c in columns if "经营活动产生的现金流量净额" in c), None)
+    capex_col = next((c for c in columns if "购建固定资产" in c), None)
+    if op_col is None:
+        return None
+
+    by_year: Dict[int, float] = {}
+    for row in df.to_dict(orient="records"):
+        date_str = str(row.get(date_col))
+        digits = "".join(ch for ch in date_str if ch.isdigit())
+        if len(digits) < 8 or digits[4:8] != "1231":
+            continue  # 只取年报
+        year = int(digits[:4])
+        try:
+            operate = float(row.get(op_col))
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(operate):
+            continue
+        capex = 0.0
+        if capex_col is not None:
+            try:
+                capex_val = float(row.get(capex_col))
+                if not math.isnan(capex_val):
+                    capex = capex_val
+            except (TypeError, ValueError):
+                capex = 0.0
+        by_year[year] = operate - capex
+
+    if not by_year:
+        return None
+
+    years_sorted = sorted(by_year)
+    recent = years_sorted[-5:]
+    vals = [by_year[y] for y in recent]
+    base = by_year[years_sorted[-1]]
+    low = min(vals)
+    high = max(vals)
+    if low == high:
+        low, high = base * 0.8, base * 1.2
+
+    factor = _amount_to_yi_factor([abs(v) for v in (low, base, high)]) or 1.0
+    return {
+        "bear": round(low / factor, 2),
+        "base": round(base / factor, 2),
+        "bull": round(high / factor, 2),
+    }
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _validate_scenario(obj: Any, lo: float, hi: float, integer: bool = False) -> Optional[Dict[str, float]]:
+    if not isinstance(obj, dict):
+        return None
+    out: Dict[str, float] = {}
+    for key in ("bear", "base", "bull"):
+        try:
+            num = float(obj.get(key))
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(num) or math.isinf(num):
+            return None
+        num = _clamp(num, lo, hi)
+        out[key] = round(num) if integer else round(num, 2)
+    return out
+
+
+def _latest_metric_value(metrics: Dict[str, List[Tuple[str, float]]], key: str) -> Optional[float]:
+    series = metrics.get(key)
+    if not series:
+        return None
+    return series[-1][1]
+
+
+def _llm_dcf_scenarios(name: str, code: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """调用配置的 LLM，基于公司财务数据给出 DCF 三档参数与依据。失败返回 None。"""
+    try:
+        from src.analyzer import get_analyzer
+    except Exception:  # noqa: BLE001
+        return None
+
+    analyzer = get_analyzer()
+    try:
+        if not analyzer.is_available():
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _fmt(v: Any) -> str:
+        return "未知" if v is None else str(v)
+
+    fcf = data.get("fcf") or {}
+    prompt = (
+        "你是资深证券分析师。请基于以下 A 股公司的历史财务数据，为「两阶段自由现金流折现(DCF)」估值"
+        "给出悲观/中等/乐观三档参数建议，并用一句话说明依据。\n\n"
+        f"公司：{name}（{code}）\n"
+        f"最近一年自由现金流：{_fmt(fcf.get('base'))} 亿元"
+        f"（近5年区间 {_fmt(fcf.get('bear'))}~{_fmt(fcf.get('bull'))} 亿元）\n"
+        f"近5年营收CAGR：{_fmt(data.get('cagr'))}%\n"
+        f"最新毛利率：{_fmt(data.get('gross_margin'))}%，ROE：{_fmt(data.get('roe'))}%，"
+        f"资产负债率：{_fmt(data.get('debt_ratio'))}%\n"
+        f"当前总市值：{_fmt(data.get('market_cap'))} 亿元\n\n"
+        "只输出严格 JSON（不要任何多余文字或解释），结构与单位如下：\n"
+        "{\n"
+        '  "fcf": {"bear": 数, "base": 数, "bull": 数},        // 基准自由现金流，单位：亿元\n'
+        '  "discount": {"bear": 数, "base": 数, "bull": 数},   // 折现率(%)，悲观应更高\n'
+        '  "growth": {"bear": 数, "base": 数, "bull": 数},     // 前 N 年每年增长率(%)\n'
+        '  "years": {"bear": 整数, "base": 整数, "bull": 整数},// 高速增长年数\n'
+        '  "perpetual": {"bear": 数, "base": 数, "bull": 数},  // 永续增长率(%)\n'
+        '  "rationale": "一句话依据（40字以内）"\n'
+        "}\n"
+        "约束：discount 在 6~12；growth 在 -5~40；years 在 3~15；perpetual 在 0~4。"
+        "三档需满足 悲观<中等<乐观（folding 折现率相反：悲观折现率最高）。"
+    )
+
+    # 部分模型（如带思考的 deepseek-v4-flash）在 max_tokens 偏小时会把额度
+    # 耗在推理上、正文为空；这里放宽额度并做一次重试以应对空返回/网关抖动。
+    text: Optional[str] = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            text = analyzer.generate_text(prompt, max_tokens=1500, temperature=0.3)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            text = None
+            logger.warning(
+                "[Valuation] dcf llm call failed for %s (attempt %d/2): %s",
+                code, attempt + 1, exc,
+            )
+        if text and text.strip():
+            break
+    if not text or not text.strip():
+        logger.warning("[Valuation] dcf llm empty after retries for %s: %s", code, last_exc)
+        return None
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned[:4].lower() == "json":
+            cleaned = cleaned[4:]
+
+    parsed: Any = None
+    try:
+        import json_repair
+
+        parsed = json_repair.loads(cleaned)
+    except Exception:  # noqa: BLE001
+        try:
+            import json
+
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                parsed = json.loads(cleaned[start : end + 1])
+        except Exception:  # noqa: BLE001
+            parsed = None
+    if not isinstance(parsed, dict):
+        logger.warning("[Valuation] dcf llm non-dict result for %s; head=%s", code, cleaned[:160])
+        return None
+
+    result: Dict[str, Any] = {}
+    fcf_sc = _validate_scenario(parsed.get("fcf"), -1e6, 1e6)
+    if fcf_sc:
+        result["fcf"] = fcf_sc
+    discount_sc = _validate_scenario(parsed.get("discount"), 6.0, 12.0)
+    if discount_sc:
+        result["discount"] = discount_sc
+    growth_sc = _validate_scenario(parsed.get("growth"), -5.0, 40.0)
+    if growth_sc:
+        result["growth"] = growth_sc
+    years_sc = _validate_scenario(parsed.get("years"), 3.0, 15.0, integer=True)
+    if years_sc:
+        result["years"] = years_sc
+    perpetual_sc = _validate_scenario(parsed.get("perpetual"), 0.0, 4.0)
+    if perpetual_sc:
+        result["perpetual"] = perpetual_sc
+
+    rationale = parsed.get("rationale")
+    result["rationale"] = str(rationale).strip()[:120] if rationale else None
+
+    # 至少要有一个核心参数才算成功（部分成功也用）
+    if not any(k in result for k in ("discount", "growth", "years", "perpetual")):
+        logger.warning("[Valuation] dcf llm produced no usable fields for %s; head=%s", code, cleaned[:160])
+        return None
+
+    logger.info("[Valuation] dcf llm ok for %s: fields=%s", code, [k for k in result if k != "rationale"])
+    return result
+
+
+def _load_dcf_reference(market: str, code: str, use_llm: bool = False) -> Dict[str, Any]:
+    """带缓存地加载 DCF 参考值。
+
+    use_llm=False：仅按历史数据推算（快，默认，页面搜索时用）。
+    use_llm=True：在数据推算基础上再调用 LLM 给三档参数（慢，点按钮时用）。
+    两种结果分开缓存。
+    """
+    cache_key = f"dcfref:{'llm' if use_llm else 'base'}:{market}:{normalize_stock_code(code).upper()}"
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]["ref"]
+
+    market_cap = None
+    price = None
+    fcf_scn: Optional[Dict[str, float]] = None
+    cagr: Optional[float] = None
+    gross_margin = roe = debt_ratio = None
+
+    try:
+        market_cap = _latest_market_cap_yi(market, code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] dcf market_cap failed for %s: %s", code, exc)
+
+    if market == "cn":
+        try:
+            price = _latest_price_sina(code)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] dcf price failed for %s: %s", code, exc)
+        try:
+            fcf_scn = _fcf_scenarios_sina(code)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] dcf fcf ref failed for %s: %s", code, exc)
+        try:
+            cagr = _revenue_cagr_pct(code)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] dcf cagr failed for %s: %s", code, exc)
+        # 毛利率/ROE/负债率仅供 LLM prompt 使用，非 LLM 时跳过以加快
+        if use_llm:
+            try:
+                metrics = _load_metrics(market, code)
+                gross_margin = _latest_metric_value(metrics, "gross_margin")
+                roe = _latest_metric_value(metrics, "roe")
+                debt_ratio = _latest_metric_value(metrics, "debt_ratio")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Valuation] dcf metrics failed for %s: %s", code, exc)
+
+    # ---- 数据推算的兜底三档 ----
+    heuristic: Dict[str, Any] = {
+        "fcf": fcf_scn,
+        "discount": {"bear": 10.0, "base": 8.0, "bull": 7.0},
+        "growth": None,
+        "years": {"bear": 3.0, "base": 5.0, "bull": 10.0},
+        "perpetual": {"bear": 2.0, "base": 3.0, "bull": 4.0},
+    }
+    if cagr is not None:
+        heuristic["growth"] = {
+            "bear": round(max(0.0, cagr * 0.5), 1),
+            "base": round(cagr, 1),
+            "bull": round(min(30.0, cagr * 1.5), 1),
+        }
+
+    # ---- LLM 推理（仅在 use_llm 且 A 股时）----
+    if use_llm and market == "cn":
+        # AI 版：只返回 LLM 真正推理出来的字段，其余保持 None，
+        # 前端对应指标就不显示 AI 行（“没推理出来就不给值”）。
+        ref: Dict[str, Any] = {
+            "market_cap": market_cap,
+            "price": price,
+            "source": "heuristic",
+            "rationale": None,
+            "fcf": None,
+            "discount": None,
+            "growth": None,
+            "years": None,
+            "perpetual": None,
+        }
+        llm = None
+        try:
+            llm = _llm_dcf_scenarios(
+                name=code,
+                code=code,
+                data={
+                    "fcf": fcf_scn,
+                    "cagr": cagr,
+                    "gross_margin": gross_margin,
+                    "roe": roe,
+                    "debt_ratio": debt_ratio,
+                    "market_cap": market_cap,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] dcf llm scenarios failed for %s: %s", code, exc)
+        if llm:
+            ref["source"] = "llm"
+            ref["rationale"] = llm.get("rationale")
+            for key in ("fcf", "discount", "growth", "years", "perpetual"):
+                if llm.get(key):
+                    ref[key] = llm[key]
+    else:
+        # 历史版：按数据推算给出全部字段（历史行始终完整）。
+        ref = {
+            "market_cap": market_cap,
+            "price": price,
+            "source": "heuristic",
+            "rationale": None,
+            **heuristic,
+        }
+
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = (now, {"ref": ref})
+    return ref
+
+
+@router.get(
+    "/dcf-reference",
+    response_model=DcfReferenceResponse,
+    summary="DCF 估值的按公司参考值（当前市值 / FCF / 增长率 等）",
+)
+def get_dcf_reference(
+    code: str = Query(..., description="股票代码或名称对应的代码"),
+    use_llm: bool = Query(False, description="是否用 LLM 推理三档参数（默认 False，仅历史推算）"),
+) -> DcfReferenceResponse:
+    raw_code = (code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=422, detail="请提供股票代码")
+
+    normalized = normalize_stock_code(raw_code)
+    market = _market_tag(normalized)
+    currency = _CURRENCY_BY_MARKET.get(market, "")
+
+    try:
+        ref = _load_dcf_reference(market, raw_code, use_llm=use_llm)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] dcf reference failed for %s: %s", raw_code, exc)
+        raise HTTPException(status_code=502, detail="获取 DCF 参考值失败，请稍后重试") from exc
+
+    market_cap = ref.get("market_cap")
+    message = None
+    if market_cap is None:
+        message = "暂无法获取该股票当前市值，DCF 结论对比可能不可用"
+
+    return DcfReferenceResponse(
+        code=normalized,
+        display_code=raw_code,
+        market=market,
+        supported=market_cap is not None,
+        currency=currency,
+        market_cap=market_cap,
+        price=ref.get("price"),
+        fcf=ref.get("fcf"),
+        discount=ref["discount"],
+        growth=ref.get("growth"),
+        years=ref["years"],
+        perpetual=ref["perpetual"],
+        source=ref.get("source", "heuristic"),
+        rationale=ref.get("rationale"),
+        message=message,
     )

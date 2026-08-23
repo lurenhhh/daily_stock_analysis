@@ -100,6 +100,30 @@ export interface MetricsResponse {
   metrics: Partial<Record<MetricKey, MetricSeries>>;
 }
 
+export interface DcfScenario {
+  bear: number;
+  base: number;
+  bull: number;
+}
+
+export interface DcfReferenceResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  currency: string;
+  marketCap: number | null;
+  price: number | null;
+  fcf: DcfScenario | null;
+  discount: DcfScenario | null;
+  growth: DcfScenario | null;
+  years: DcfScenario | null;
+  perpetual: DcfScenario | null;
+  source: string;
+  rationale: string | null;
+  message: string | null;
+}
+
 export const valuationApi = {
   /**
    * 获取个股历史 PE 走势与正态分布估值参考线。
@@ -148,5 +172,22 @@ export const valuationApi = {
       signal: options.signal,
     });
     return toCamelCase<MetricsResponse>(response.data);
+  },
+
+  /**
+   * 获取 DCF 估值的按公司参考值（当前市值、FCF、增长率等）。
+   */
+  getDcfReference: async (
+    code: string,
+    params: { useLlm?: boolean } = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<DcfReferenceResponse> => {
+    const useLlm = params.useLlm ?? false;
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/dcf-reference', {
+      params: { code, use_llm: useLlm },
+      signal: options.signal,
+      timeout: useLlm ? 120000 : 30000, // LLM 推理慢，放宽到 120s；历史推算用默认
+    });
+    return toCamelCase<DcfReferenceResponse>(response.data);
   },
 };

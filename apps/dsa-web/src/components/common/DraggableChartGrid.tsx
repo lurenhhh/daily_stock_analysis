@@ -12,6 +12,8 @@ export interface ChartPanelSpec {
   subtitle?: React.ReactNode;
   /** 面板正文（图表等） */
   content: React.ReactNode;
+  /** 面板头部右侧的操作区（如「加入看板」「移除」按钮） */
+  actions?: React.ReactNode;
   /** 未被用户手动调整过时的默认宽度：2=整行，1=半宽 */
   defaultSpan?: 1 | 2;
 }
@@ -159,14 +161,21 @@ export const DraggableChartGrid: React.FC<DraggableChartGridProps> = ({ panels, 
                   <GripVertical className="h-4 w-4" />
                 </span>
                 <h3 className="min-w-0 truncate text-lg font-semibold text-foreground">{panel.title}</h3>
-                <button
-                  type="button"
-                  onClick={() => toggleSpan(panel.id)}
-                  className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border/70 bg-card/70 px-2.5 py-1 text-xs text-secondary-text transition-colors hover:bg-hover hover:text-foreground"
+                <div
+                  className="ml-auto flex shrink-0 items-center gap-2"
+                  draggable={false}
+                  onDragStart={(event) => event.stopPropagation()}
                 >
-                  {span === 2 ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-                  {span === 2 ? labels.half : labels.full}
-                </button>
+                  {panel.actions}
+                  <button
+                    type="button"
+                    onClick={() => toggleSpan(panel.id)}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border/70 bg-card/70 px-2.5 py-1 text-xs text-secondary-text transition-colors hover:bg-hover hover:text-foreground"
+                  >
+                    {span === 2 ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    {span === 2 ? labels.half : labels.full}
+                  </button>
+                </div>
               </div>
               {panel.subtitle ? <div className="mb-3 -mt-1">{panel.subtitle}</div> : null}
               {panel.content}
