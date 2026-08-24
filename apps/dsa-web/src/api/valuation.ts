@@ -124,6 +124,70 @@ export interface DcfReferenceResponse {
   message: string | null;
 }
 
+export interface MilestoneItem {
+  date: string;
+  title: string;
+  detail: string;
+  kind: string;
+  impact: string; // 仅股价类：up / down / ''
+}
+
+export interface MilestonesResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  source: string;
+  message: string | null;
+  general: MilestoneItem[];
+  strategy: MilestoneItem[];
+  price: MilestoneItem[];
+}
+
+export interface LeaderEvent {
+  date: string;
+  event: string;
+  kind: string; // role / deed / other
+}
+
+export interface Leader {
+  name: string;
+  title: string;
+  tenure: string;
+  intro: string;
+  timeline: LeaderEvent[];
+  achievements: string[];
+  controversies: string[];
+}
+
+export interface LeadersResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  source: string;
+  message: string | null;
+  leaders: Leader[];
+}
+
+export interface SegmentRevenuePoint {
+  date: string;
+  revenues: number[]; // 与 segments 顺序对齐
+}
+
+export interface SegmentRevenueResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  currency: string;
+  unit: string;
+  classify: string;
+  message: string | null;
+  segments: string[];
+  points: SegmentRevenuePoint[];
+}
+
 export const valuationApi = {
   /**
    * 获取个股历史 PE 走势与正态分布估值参考线。
@@ -189,5 +253,52 @@ export const valuationApi = {
       timeout: useLlm ? 120000 : 30000, // LLM 推理慢，放宽到 120s；历史推算用默认
     });
     return toCamelCase<DcfReferenceResponse>(response.data);
+  },
+  /**
+   * 获取公司重要里程碑时间轴（LLM 生成，按钮触发）。
+   */
+  getMilestones: async (
+    code: string,
+    params: { name?: string } = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<MilestonesResponse> => {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/milestones', {
+      params: { code, name: params.name ?? '' },
+      signal: options.signal,
+      timeout: 180000, // 思考型模型 + 多条节点，放宽到 180s
+    });
+    return toCamelCase<MilestonesResponse>(response.data);
+  },
+
+  /**
+   * 获取公司主要领导人（LLM 生成：介绍/成就/公开争议）。
+   */
+  getLeaders: async (
+    code: string,
+    params: { name?: string } = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<LeadersResponse> => {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/leaders', {
+      params: { code, name: params.name ?? '' },
+      signal: options.signal,
+      timeout: 180000, // 思考型模型，放宽到 180s
+    });
+    return toCamelCase<LeadersResponse>(response.data);
+  },
+
+  /**
+   * 获取公司各业务（主营构成）营收时间序列。
+   */
+  getSegmentRevenue: async (
+    code: string,
+    params: GetFundamentalsParams = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<SegmentRevenueResponse> => {
+    const { years = 20 } = params;
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/segment-revenue', {
+      params: { code, years },
+      signal: options.signal,
+    });
+    return toCamelCase<SegmentRevenueResponse>(response.data);
   },
 };

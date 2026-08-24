@@ -129,3 +129,81 @@ class DcfReferenceResponse(BaseModel):
     source: str = Field("heuristic", description="参考值来源：llm / heuristic")
     rationale: Optional[str] = Field(None, description="LLM 给出的简短依据")
     message: Optional[str] = Field(None, description="补充说明")
+
+
+class MilestoneItem(BaseModel):
+    """公司发展史上的一个重要节点。"""
+
+    date: str = Field(..., description="发生时间（YYYY 或 YYYY-MM）")
+    title: str = Field(..., description="节点标题（简短）")
+    detail: str = Field("", description="一句话说明")
+    kind: str = Field("other", description="类别：ipo/ma/product/capital/policy/price/other")
+    impact: str = Field("", description="仅股价类：up=大涨 / down=大跌 / 空")
+
+
+class MilestonesResponse(BaseModel):
+    """公司里程碑时间轴（由 LLM 生成，参考性质）。三列：发展 / 战略 / 股价波动。"""
+
+    code: str = Field(..., description="规范化后的股票代码")
+    display_code: str = Field(..., description="用于展示的原始/精简代码")
+    market: str = Field(..., description="市场标签")
+    supported: bool = Field(..., description="是否成功生成里程碑")
+    source: str = Field("llm", description="来源：llm / none")
+    message: Optional[str] = Field(None, description="补充说明")
+    general: List[MilestoneItem] = Field(default_factory=list, description="发展/重要节点（时间升序）")
+    strategy: List[MilestoneItem] = Field(default_factory=list, description="战略里程碑（时间升序）")
+    price: List[MilestoneItem] = Field(default_factory=list, description="引发股价大幅波动的事件（时间升序）")
+
+
+class LeaderEvent(BaseModel):
+    """领导人生平中的一个重要节点（岗位变动/重要事迹）。"""
+
+    date: str = Field(..., description="时间（YYYY 或 YYYY-MM）")
+    event: str = Field(..., description="事件（岗位变动或重要事迹）")
+    kind: str = Field("other", description="类别：role=岗位变动 / deed=重要事迹 / other")
+
+
+class Leader(BaseModel):
+    """公司一位主要领导人的资料（LLM 生成，参考性质）。"""
+
+    name: str = Field(..., description="姓名")
+    title: str = Field(..., description="职务")
+    tenure: str = Field("", description="任期（可空）")
+    intro: str = Field("", description="一句话背景介绍")
+    timeline: List[LeaderEvent] = Field(default_factory=list, description="生平重要节点（岗位变动/重要事迹，时间升序）")
+    achievements: List[str] = Field(default_factory=list, description="重要成就")
+    controversies: List[str] = Field(default_factory=list, description="公开报道的争议/历史污点（无则为空）")
+
+
+class LeadersResponse(BaseModel):
+    """公司主要领导人列表（LLM 生成，参考性质）。"""
+
+    code: str = Field(..., description="规范化后的股票代码")
+    display_code: str = Field(..., description="用于展示的原始/精简代码")
+    market: str = Field(..., description="市场标签")
+    supported: bool = Field(..., description="是否成功生成")
+    source: str = Field("llm", description="来源：llm / none")
+    message: Optional[str] = Field(None, description="补充说明")
+    leaders: List[Leader] = Field(default_factory=list, description="主要领导人列表")
+
+
+class SegmentRevenuePoint(BaseModel):
+    """某个报告期各业务的营收（单位：亿，本币）。"""
+
+    date: str = Field(..., description="报告期 YYYY-MM-DD")
+    revenues: List[float] = Field(default_factory=list, description="与 segments 顺序对齐的营收（亿），缺失记 0")
+
+
+class SegmentRevenueResponse(BaseModel):
+    """公司各业务（主营构成）营收时间序列。"""
+
+    code: str = Field(..., description="规范化后的股票代码")
+    display_code: str = Field(..., description="用于展示的原始/精简代码")
+    market: str = Field(..., description="市场标签")
+    supported: bool = Field(..., description="是否有可用的主营构成数据")
+    currency: str = Field("CNY", description="计价货币")
+    unit: str = Field("亿", description="金额单位")
+    classify: str = Field("", description="分类口径：按产品分类 / 按行业分类 / 按地区分类")
+    message: Optional[str] = Field(None, description="补充说明")
+    segments: List[str] = Field(default_factory=list, description="业务名列表")
+    points: List[SegmentRevenuePoint] = Field(default_factory=list, description="按报告期升序")

@@ -5,6 +5,7 @@ import {
   type FundamentalsResponse,
   type MetricsResponse,
   type PeHistoryResponse,
+  type SegmentRevenueResponse,
   type ValuationMetric,
   type ValuationZone,
 } from '../api/valuation';
@@ -12,7 +13,10 @@ import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { ApiErrorAlert, AppPage, Card, EmptyState, PageHeader, StatCard } from '../components/common';
 import { DraggableChartGrid, type ChartPanelSpec } from '../components/common/DraggableChartGrid';
 import { DcfCalculator } from '../components/valuation/DcfCalculator';
+import { MilestoneTimeline } from '../components/valuation/MilestoneTimeline';
+import { LeadersPanel } from '../components/valuation/LeadersPanel';
 import { FundChart, MetricChartView, PeChart } from '../components/valuation/charts';
+import { SegmentRevenueChart } from '../components/valuation/SegmentRevenueChart';
 import {
   METRIC_CONFIG,
   buildFundData,
@@ -99,6 +103,7 @@ const ValuationPage: React.FC = () => {
   const [data, setData] = useState<PeHistoryResponse | null>(null);
   const [fundamentals, setFundamentals] = useState<FundamentalsResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
+  const [segments, setSegments] = useState<SegmentRevenueResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ParsedApiError | null>(null);
 
@@ -121,16 +126,18 @@ const ValuationPage: React.FC = () => {
     setError(null);
 
     try {
-      const [peResult, fundResult, metricsResult] = await Promise.allSettled([
+      const [peResult, fundResult, metricsResult, segResult] = await Promise.allSettled([
         valuationApi.getPeHistory(trimmed, { metric: nextMetric, years: nextYears }, { signal: controller.signal }),
         valuationApi.getFundamentals(trimmed, { years: nextYears }, { signal: controller.signal }),
         valuationApi.getMetrics(trimmed, { years: nextYears }, { signal: controller.signal }),
+        valuationApi.getSegmentRevenue(trimmed, { years: nextYears }, { signal: controller.signal }),
       ]);
       if (seq !== requestSeqRef.current) {
         return;
       }
       setFundamentals(fundResult.status === 'fulfilled' ? fundResult.value : null);
       setMetrics(metricsResult.status === 'fulfilled' ? metricsResult.value : null);
+      setSegments(segResult.status === 'fulfilled' ? segResult.value : null);
       if (peResult.status === 'fulfilled') {
         setData(peResult.value);
       } else {
@@ -258,6 +265,14 @@ const ValuationPage: React.FC = () => {
         ),
       });
     }
+  }
+  if (segments && segments.supported && segments.points.length > 0) {
+    chartPanels.push({
+      id: 'segment',
+      title: t('valuation.segmentTitle'),
+      defaultSpan: 2,
+      content: <SegmentRevenueChart data={segments} language={language} t={t} />,
+    });
   }
 
   return (
@@ -417,6 +432,14 @@ const ValuationPage: React.FC = () => {
 
         {!loading && data && data.supported ? (
           <DcfCalculator code={dashCode} displayCode={dashDisplay} name={stockName} />
+        ) : null}
+
+        {!loading && data && data.supported ? (
+          <MilestoneTimeline code={dashCode} displayCode={dashDisplay} name={stockName} />
+        ) : null}
+
+        {!loading && data && data.supported ? (
+          <LeadersPanel code={dashCode} displayCode={dashDisplay} name={stockName} />
         ) : null}
 
         {!loading && chartPanels.length > 0 ? (

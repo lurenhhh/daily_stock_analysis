@@ -35,8 +35,15 @@ from fastapi import APIRouter, HTTPException, Query
 from api.v1.schemas.valuation import (
     DcfReferenceResponse,
     FundamentalsResponse,
+    Leader,
+    LeaderEvent,
+    LeadersResponse,
     MetricsResponse,
+    MilestoneItem,
+    MilestonesResponse,
     PeHistoryResponse,
+    SegmentRevenuePoint,
+    SegmentRevenueResponse,
 )
 from data_provider.base import _market_tag, normalize_stock_code
 
@@ -1031,7 +1038,7 @@ def _llm_dcf_scenarios(name: str, code: str, data: Dict[str, Any]) -> Optional[D
     last_exc: Optional[Exception] = None
     for attempt in range(2):
         try:
-            text = analyzer.generate_text(prompt, max_tokens=1500, temperature=0.3)
+            text = analyzer.generate_text(prompt, max_tokens=3000, temperature=0.3)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             text = None
@@ -1258,4 +1265,537 @@ def get_dcf_reference(
         source=ref.get("source", "heuristic"),
         rationale=ref.get("rationale"),
         message=message,
+    )
+
+
+# ==============================================================
+# 公司里程碑时间轴（LLM 生成，按钮触发）
+# ==============================================================
+
+
+_MILESTONE_KINDS = {"ipo", "ma", "product", "capital", "policy", "price", "other"}
+
+
+def _parse_ms_list(raw: Any, allow_impact: bool = False) -> List[Dict[str, Any]]:
+    """校验并规范一组里程碑；allow_impact=True 时解析股价方向。"""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        date = str(it.get("date") or "").strip()
+        title = str(it.get("title") or "").strip()
+        if not date or not title:
+            continue
+        detail = str(it.get("detail") or "").strip()
+        kind = str(it.get("kind") or "other").strip().lower()
+        if kind not in _MILESTONE_KINDS:
+            kind = "other"
+        impact = ""
+        if allow_impact:
+            imp = str(it.get("impact") or "").strip().lower()
+            if imp in ("up", "down"):
+                impact = imp
+            kind = "price"
+        out.append({"date": date[:16], "title": title[:40], "detail": detail[:80], "kind": kind, "impact": impact})
+        if len(out) >= 10:
+            break
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
+def _llm_milestones(name: str, code: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    """调用 LLM 生成三类里程碑（发展 / 战略 / 股价波动）。失败返回 None。"""
+    try:
+        from src.analyzer import get_analyzer
+    except Exception:  # noqa: BLE001
+        return None
+
+    analyzer = get_analyzer()
+    try:
+        if not analyzer.is_available():
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    label = name or code
+    prompt = (
+        "你是资深行业研究员。请针对「" + label + "（" + code + "）」这家上市公司，"
+        "输出三类里程碑，每类都按时间从早到晚排列：\n"
+        "1) general：公司发展史上的重要节点（成立/上市/重大并购/关键产品等）6-8 条；\n"
+        "2) strategy：公司战略层面的关键节点（战略转型/新业务布局/重大投资/组织变革/出海等）4-6 条；\n"
+        "3) price：曾引发股价大幅波动的事件（业绩暴雷或超预期、政策、突发事件、重大合同等）4-6 条，"
+        "并用 impact 标注方向（up=大涨 / down=大跌）。\n\n"
+        "只输出严格 JSON（不要任何多余文字或解释），结构如下：\n"
+        "{\n"
+        '  "general": [{"date":"YYYY 或 YYYY-MM","title":"<=12字","detail":"<=30字","kind":"ipo|ma|product|capital|policy|other"}],\n'
+        '  "strategy":[{"date":"...","title":"...","detail":"...","kind":"..."}],\n'
+        '  "price":   [{"date":"...","title":"...","detail":"...","impact":"up|down"}]\n'
+        "}\n"
+        "只包含真实、公开、确有其事的事件；年份不确定时给大致年份并保持谨慎。"
+    )
+
+    text: Optional[str] = None
+    for attempt in range(2):
+        try:
+            text = analyzer.generate_text(prompt, max_tokens=6000, temperature=0.4)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] milestones llm failed for %s (attempt %d/2): %s", code, attempt + 1, exc)
+            text = None
+        if text and text.strip():
+            break
+    if not text or not text.strip():
+        return None
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned[:4].lower() == "json":
+            cleaned = cleaned[4:]
+
+    parsed: Any = None
+    try:
+        import json_repair
+
+        parsed = json_repair.loads(cleaned)
+    except Exception:  # noqa: BLE001
+        try:
+            import json
+
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                parsed = json.loads(cleaned[start : end + 1])
+        except Exception:  # noqa: BLE001
+            parsed = None
+
+    if isinstance(parsed, list):
+        parsed = {"general": parsed}
+    if not isinstance(parsed, dict):
+        logger.warning("[Valuation] milestones non-dict for %s; head=%s", code, cleaned[:160])
+        return None
+
+    result = {
+        "general": _parse_ms_list(parsed.get("general")),
+        "strategy": _parse_ms_list(parsed.get("strategy")),
+        "price": _parse_ms_list(parsed.get("price"), allow_impact=True),
+    }
+    if not any(result.values()):
+        logger.warning("[Valuation] milestones produced nothing for %s; head=%s", code, cleaned[:160])
+        return None
+    logger.info(
+        "[Valuation] milestones llm ok for %s: general=%d strategy=%d price=%d",
+        code, len(result["general"]), len(result["strategy"]), len(result["price"]),
+    )
+    return result
+
+
+def _load_milestones(market: str, code: str, name: str) -> Dict[str, Any]:
+    """带缓存地加载三类里程碑（仅 LLM，6h 缓存，成功才缓存）。"""
+    cache_key = f"milestones:{market}:{normalize_stock_code(code).upper()}"
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]["ref"]
+
+    groups = None
+    try:
+        groups = _llm_milestones(name=name, code=code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] milestones failed for %s: %s", code, exc)
+
+    if groups:
+        ref = {**groups, "source": "llm"}
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"ref": ref})
+        return ref
+    return {"general": [], "strategy": [], "price": [], "source": "none"}
+
+
+@router.get(
+    "/milestones",
+    response_model=MilestonesResponse,
+    summary="公司重要里程碑时间轴（LLM 生成，三列：发展/战略/股价波动）",
+)
+def get_milestones(
+    code: str = Query(..., description="股票代码或名称对应的代码"),
+    name: str = Query("", description="公司名称（用于提升 LLM 准确度）"),
+) -> MilestonesResponse:
+    raw_code = (code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=422, detail="请提供股票代码")
+
+    normalized = normalize_stock_code(raw_code)
+    market = _market_tag(normalized)
+
+    try:
+        ref = _load_milestones(market, raw_code, (name or "").strip())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] milestones endpoint failed for %s: %s", raw_code, exc)
+        raise HTTPException(status_code=502, detail="生成里程碑失败，请稍后重试") from exc
+
+    general = ref.get("general") or []
+    strategy = ref.get("strategy") or []
+    price = ref.get("price") or []
+    any_data = bool(general or strategy or price)
+    return MilestonesResponse(
+        code=normalized,
+        display_code=raw_code,
+        market=market,
+        supported=any_data,
+        source=ref.get("source", "none"),
+        message=None if any_data else "暂未能生成该公司的里程碑，请稍后重试",
+        general=[MilestoneItem(**it) for it in general],
+        strategy=[MilestoneItem(**it) for it in strategy],
+        price=[MilestoneItem(**it) for it in price],
+    )
+
+
+# ==============================================================
+# 公司主要领导人（LLM 生成，按钮触发）
+# ==============================================================
+
+
+def _parse_str_list(raw: Any, max_items: int, max_len: int) -> List[str]:
+    out: List[str] = []
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        text = str(it).strip()
+        if not text:
+            continue
+        out.append(text[:max_len])
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _parse_leader_timeline(raw: Any) -> List[Dict[str, Any]]:
+    """校验领导人生平节点（岗位变动/重要事迹），按时间升序。"""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        date = str(it.get("date") or "").strip()
+        event = str(it.get("event") or "").strip()
+        if not date or not event:
+            continue
+        kind = str(it.get("kind") or "other").strip().lower()
+        if kind not in ("role", "deed"):
+            kind = "other"
+        out.append({"date": date[:16], "event": event[:80], "kind": kind})
+        if len(out) >= 10:
+            break
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
+def _llm_leaders(name: str, code: str) -> Optional[List[Dict[str, Any]]]:
+    """调用 LLM 生成公司主要领导人资料。失败返回 None。"""
+    try:
+        from src.analyzer import get_analyzer
+    except Exception:  # noqa: BLE001
+        return None
+
+    analyzer = get_analyzer()
+    try:
+        if not analyzer.is_available():
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    label = name or code
+    prompt = (
+        "你是资深公司治理研究员。请列出「" + label + "（" + code + "）」这家上市公司"
+        "的 2-5 位主要领导人（如董事长、总经理/CEO、创始人、核心高管），"
+        "并给出客观、基于公开信息的资料。\n\n"
+        "只输出严格 JSON 数组（不要任何多余文字或解释），每个元素结构如下：\n"
+        "{\n"
+        '  "name": "姓名",\n'
+        '  "title": "职务",\n'
+        '  "tenure": "任期(如 2015 至今，可空)",\n'
+        '  "intro": "一句话背景介绍(<=40字)",\n'
+        '  "timeline": [{"date":"YYYY","event":"岗位变动或重要事迹(<=24字)","kind":"role|deed"}],\n'
+        '  "achievements": ["重要成就1", "重要成就2"],\n'
+        '  "controversies": ["公开报道过的争议或负面事件"]\n'
+        "}\n"
+        "timeline 为该领导人生平重要节点（岗位变动/重要事迹），按时间从早到晚 3-8 条，"
+        "kind：role=岗位变动，deed=重要事迹。\n"
+        "严格要求：controversies 只能包含【公开报道、确有其事、可查证】的争议或负面事件；"
+        "任何不确定、道听途说、未经证实或涉及个人隐私的内容一律留空数组 []，绝对不要编造或推测。"
+        "intro 与 achievements 需客观中立、基于事实。"
+    )
+
+    text: Optional[str] = None
+    for attempt in range(2):
+        try:
+            text = analyzer.generate_text(prompt, max_tokens=6000, temperature=0.3)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Valuation] leaders llm failed for %s (attempt %d/2): %s", code, attempt + 1, exc)
+            text = None
+        if text and text.strip():
+            break
+    if not text or not text.strip():
+        return None
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned[:4].lower() == "json":
+            cleaned = cleaned[4:]
+
+    parsed: Any = None
+    try:
+        import json_repair
+
+        parsed = json_repair.loads(cleaned)
+    except Exception:  # noqa: BLE001
+        try:
+            import json
+
+            start = cleaned.find("[")
+            end = cleaned.rfind("]")
+            if start >= 0 and end > start:
+                parsed = json.loads(cleaned[start : end + 1])
+        except Exception:  # noqa: BLE001
+            parsed = None
+
+    if isinstance(parsed, dict):
+        for key in ("leaders", "data", "items", "list"):
+            if isinstance(parsed.get(key), list):
+                parsed = parsed[key]
+                break
+    if not isinstance(parsed, list):
+        logger.warning("[Valuation] leaders non-list for %s; head=%s", code, cleaned[:160])
+        return None
+
+    out: List[Dict[str, Any]] = []
+    for raw in parsed:
+        if not isinstance(raw, dict):
+            continue
+        nm = str(raw.get("name") or "").strip()
+        title = str(raw.get("title") or "").strip()
+        if not nm or not title:
+            continue
+        out.append({
+            "name": nm[:40],
+            "title": title[:40],
+            "tenure": str(raw.get("tenure") or "").strip()[:40],
+            "intro": str(raw.get("intro") or "").strip()[:120],
+            "timeline": _parse_leader_timeline(raw.get("timeline")),
+            "achievements": _parse_str_list(raw.get("achievements"), 6, 100),
+            "controversies": _parse_str_list(raw.get("controversies"), 6, 120),
+        })
+        if len(out) >= 6:
+            break
+
+    if not out:
+        return None
+    logger.info("[Valuation] leaders llm ok for %s: %d leaders", code, len(out))
+    return out
+
+
+def _load_leaders(market: str, code: str, name: str) -> Dict[str, Any]:
+    """带缓存地加载领导人（仅 LLM，6h 缓存，成功才缓存）。"""
+    cache_key = f"leaders:{market}:{normalize_stock_code(code).upper()}"
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]["ref"]
+
+    leaders = None
+    try:
+        leaders = _llm_leaders(name=name, code=code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] leaders failed for %s: %s", code, exc)
+
+    ref = {"leaders": leaders or [], "source": "llm" if leaders else "none"}
+    if leaders:
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"ref": ref})
+    return ref
+
+
+@router.get(
+    "/leaders",
+    response_model=LeadersResponse,
+    summary="公司主要领导人（LLM 生成：介绍/成就/公开争议）",
+)
+def get_leaders(
+    code: str = Query(..., description="股票代码或名称对应的代码"),
+    name: str = Query("", description="公司名称（用于提升 LLM 准确度）"),
+) -> LeadersResponse:
+    raw_code = (code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=422, detail="请提供股票代码")
+
+    normalized = normalize_stock_code(raw_code)
+    market = _market_tag(normalized)
+
+    try:
+        ref = _load_leaders(market, raw_code, (name or "").strip())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] leaders endpoint failed for %s: %s", raw_code, exc)
+        raise HTTPException(status_code=502, detail="生成领导人资料失败，请稍后重试") from exc
+
+    leaders = ref.get("leaders") or []
+    return LeadersResponse(
+        code=normalized,
+        display_code=raw_code,
+        market=market,
+        supported=bool(leaders),
+        source=ref.get("source", "none"),
+        message=None if leaders else "暂未能生成该公司的领导人资料，请稍后重试",
+        leaders=[Leader(**it) for it in leaders],
+    )
+
+
+# ==============================================================
+# 各业务营收（主营构成，东方财富；港股/美股不支持）
+# ==============================================================
+
+_ZYGC_CLASSIFY_PREF = ("按产品分类", "按行业分类", "按地区分类")
+
+
+def _em_symbol_cn(code: str) -> str:
+    digits = "".join(ch for ch in normalize_stock_code(code) if ch.isdigit())[:6]
+    if len(digits) < 6:
+        return ""
+    head = digits[0]
+    if head in ("6", "9"):
+        return "SH" + digits
+    if head in ("0", "2", "3"):
+        return "SZ" + digits
+    if head in ("4", "8"):
+        return "BJ" + digits
+    return "SH" + digits
+
+
+def _fetch_segment_revenue(code: str, years: int) -> Dict[str, Any]:
+    """从东方财富主营构成构建各业务营收时间序列（金额转亿）。"""
+    import akshare as ak
+
+    symbol = _em_symbol_cn(code)
+    if not symbol:
+        return {"supported": False, "classify": "", "segments": [], "points": [], "message": "无法识别股票代码"}
+
+    df = ak.stock_zygc_em(symbol=symbol)
+    if df is None or getattr(df, "empty", True):
+        return {"supported": False, "classify": "", "segments": [], "points": [], "message": "暂无主营构成数据"}
+
+    classify = ""
+    sub = None
+    for c in _ZYGC_CLASSIFY_PREF:
+        part = df[df["分类类型"] == c]
+        if not part.empty:
+            classify = c
+            sub = part
+            break
+    if sub is None or sub.empty:
+        return {"supported": False, "classify": "", "segments": [], "points": [], "message": "暂无可用的主营构成分类"}
+
+    rows: List[Tuple[str, str, float]] = []
+    for _, r in sub.iterrows():
+        raw_date = r.get("报告日期")
+        seg = str(r.get("主营构成") or "").strip()
+        rev = r.get("主营收入")
+        if raw_date is None or not seg:
+            continue
+        try:
+            rev_f = float(rev)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(rev_f):
+            continue
+        rows.append((str(raw_date)[:10], seg, round(rev_f / 1e8, 2)))
+
+    if not rows:
+        return {"supported": False, "classify": classify, "segments": [], "points": [], "message": "主营构成无有效营收数据"}
+
+    all_dates = sorted({d for d, _, _ in rows})
+    max_year = int(all_dates[-1][:4]) if all_dates else 0
+    if years and years > 0 and max_year:
+        cutoff = max_year - years
+        rows = [row for row in rows if int(row[0][:4]) >= cutoff]
+
+    totals: Dict[str, float] = {}
+    for _, seg, rev in rows:
+        totals[seg] = totals.get(seg, 0.0) + max(rev, 0.0)
+    top = [s for s, _ in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]]
+    top_set = set(top)
+    has_other = any(seg not in top_set for _, seg, _ in rows)
+
+    per_date: Dict[str, Dict[str, float]] = {}
+    for d, seg, rev in rows:
+        bucket = per_date.setdefault(d, {})
+        key = seg if seg in top_set else "其他"
+        bucket[key] = round(bucket.get(key, 0.0) + rev, 2)
+
+    segments = list(top) + (["其他"] if has_other else [])
+    points = []
+    for d in sorted(per_date):
+        bucket = per_date[d]
+        points.append({"date": d, "revenues": [round(bucket.get(seg, 0.0), 2) for seg in segments]})
+    return {"supported": True, "classify": classify, "segments": segments, "points": points, "message": None}
+
+
+def _load_segment_revenue(market: str, code: str, years: int) -> Dict[str, Any]:
+    """带缓存地加载各业务营收（仅成功时缓存）。"""
+    cache_key = f"segrev:{market}:{normalize_stock_code(code).upper()}:{years}"
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]["ref"]
+
+    if market != "cn":
+        return {"supported": False, "classify": "", "segments": [], "points": [], "message": "该市场暂无主营构成数据源"}
+
+    try:
+        ref = _fetch_segment_revenue(code, years)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] segment revenue failed for %s: %s", code, exc)
+        ref = {
+            "supported": False, "classify": "", "segments": [], "points": [],
+            "message": "主营构成数据源（东方财富）暂不可用，可能被网络/代理拦截",
+        }
+    if ref.get("supported"):
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"ref": ref})
+    return ref
+
+
+@router.get(
+    "/segment-revenue",
+    response_model=SegmentRevenueResponse,
+    summary="公司各业务（主营构成）营收时间序列",
+)
+def get_segment_revenue(
+    code: str = Query(..., description="股票代码或名称对应的代码"),
+    years: int = Query(20, ge=1, le=30, description="回溯年数，默认 20"),
+) -> SegmentRevenueResponse:
+    raw_code = (code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=422, detail="请提供股票代码")
+
+    normalized = normalize_stock_code(raw_code)
+    market = _market_tag(normalized)
+
+    ref = _load_segment_revenue(market, raw_code, years)
+    return SegmentRevenueResponse(
+        code=normalized,
+        display_code=raw_code,
+        market=market,
+        supported=bool(ref.get("supported")),
+        currency="CNY",
+        unit="亿",
+        classify=ref.get("classify", ""),
+        message=ref.get("message"),
+        segments=ref.get("segments", []),
+        points=[SegmentRevenuePoint(**p) for p in ref.get("points", [])],
     )
