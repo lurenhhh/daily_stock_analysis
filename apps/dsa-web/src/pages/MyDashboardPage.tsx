@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { LayoutDashboard, RefreshCw, Trash2 } from 'lucide-react';
+import { Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import {
   valuationApi,
   type FundamentalsResponse,
@@ -7,7 +7,7 @@ import {
   type MetricsResponse,
   type PeHistoryResponse,
 } from '../api/valuation';
-import { AppPage, EmptyState, PageHeader } from '../components/common';
+import { AppPage, PageHeader } from '../components/common';
 import { DraggableChartGrid, type ChartPanelSpec } from '../components/common/DraggableChartGrid';
 import { FundChart, MetricChartView, PeChart } from '../components/valuation/charts';
 import {
@@ -25,6 +25,12 @@ import {
   type DashboardItem,
 } from '../utils/myDashboard';
 import { cn } from '../utils/cn';
+import { AccountPanel } from '../components/account/AccountPanel';
+import { TemplateGallery } from '../components/dashboard/TemplateGallery';
+import { TemplateDetail } from '../components/dashboard/TemplateDetail';
+import { ApplyTemplateModal } from '../components/dashboard/ApplyTemplateModal';
+import type { LensTemplate } from '../data/lensTemplates';
+import type { ApplyResult } from '../utils/applyLensTemplate';
 
 type Translate = (key: UiTextKey, params?: UiTextParams) => string;
 
@@ -60,6 +66,10 @@ const MyDashboardPage: React.FC = () => {
   const [dataById, setDataById] = useState<Record<string, ItemData>>({});
   const [loading, setLoading] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [viewingTemplate, setViewingTemplate] = useState<LensTemplate | null>(null);
+  const [applyingTemplate, setApplyingTemplate] = useState<LensTemplate | null>(null);
+  const [applied, setApplied] = useState<ApplyResult | null>(null);
 
   // 监听看板变更（来自估值页「加入看板」或本页「移除」）
   useEffect(() => {
@@ -131,6 +141,30 @@ const MyDashboardPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 以 itemsKey/reloadKey 作为稳定触发条件
   }, [itemsKey, reloadKey]);
 
+  // 应用模版后的轻提示，自动消失。
+  useEffect(() => {
+    if (!applied) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setApplied(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [applied]);
+
+  const handleView = (tpl: LensTemplate) => {
+    setGalleryOpen(false);
+    setViewingTemplate(tpl);
+  };
+  const handleApply = (tpl: LensTemplate) => {
+    setGalleryOpen(false);
+    setViewingTemplate(null);
+    setApplyingTemplate(tpl);
+  };
+  const handleApplied = (result: ApplyResult) => {
+    setApplyingTemplate(null);
+    setGalleryOpen(false);
+    setApplied(result);
+  };
+
   const panels: ChartPanelSpec[] = items.map((item) => {
     const entry = dataById[item.id];
     const label = chartLabel(item, t);
@@ -192,25 +226,33 @@ const MyDashboardPage: React.FC = () => {
           description={t('myDashboard.description')}
           actions={
             items.length > 0 ? (
-              <button
-                type="button"
-                className="btn-secondary inline-flex items-center gap-2"
-                onClick={() => setReloadKey((key) => key + 1)}
-                disabled={loading}
-              >
-                <RefreshCw className={cn('h-4 w-4', loading ? 'animate-spin' : '')} />
-                {t('myDashboard.refresh')}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary inline-flex items-center gap-2"
+                  onClick={() => setGalleryOpen(true)}
+                >
+                  <Plus className="h-4 w-4" />
+                  {t('myDashboard.templates.addFromTemplate')}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary inline-flex items-center gap-2"
+                  onClick={() => setReloadKey((key) => key + 1)}
+                  disabled={loading}
+                >
+                  <RefreshCw className={cn('h-4 w-4', loading ? 'animate-spin' : '')} />
+                  {t('myDashboard.refresh')}
+                </button>
+              </>
             ) : undefined
           }
         />
 
+        <AccountPanel />
+
         {items.length === 0 ? (
-          <EmptyState
-            title={t('myDashboard.emptyTitle')}
-            description={t('myDashboard.emptyDescription')}
-            icon={<LayoutDashboard className="h-8 w-8" />}
-          />
+          <TemplateGallery onApply={handleApply} onView={handleView} />
         ) : (
           <DraggableChartGrid
             panels={panels}
@@ -222,6 +264,32 @@ const MyDashboardPage: React.FC = () => {
             }}
           />
         )}
+
+        {galleryOpen ? (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4">
+            <div className="absolute inset-0 bg-black/50" onClick={() => setGalleryOpen(false)} aria-hidden="true" />
+            <div className="relative z-10 my-8 w-full max-w-4xl rounded-2xl border border-border/70 bg-card/95 p-5 shadow-2xl">
+              <button
+                type="button"
+                onClick={() => setGalleryOpen(false)}
+                className="absolute right-3 top-3 rounded-lg p-1 text-secondary-text transition-colors hover:bg-hover hover:text-foreground"
+                aria-label="close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <TemplateGallery onApply={handleApply} onView={handleView} />
+            </div>
+          </div>
+        ) : null}
+
+        <TemplateDetail template={viewingTemplate} onClose={() => setViewingTemplate(null)} onApply={handleApply} />
+        <ApplyTemplateModal key={applyingTemplate?.id ?? 'none'} template={applyingTemplate} onClose={() => setApplyingTemplate(null)} onApplied={handleApplied} />
+
+        {applied ? (
+          <div className="fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-xl border border-cyan/40 bg-card/95 px-4 py-2 text-sm text-foreground shadow-2xl">
+            {t('myDashboard.templates.applied', { added: applied.added, skipped: applied.skipped })}
+          </div>
+        ) : null}
       </div>
     </AppPage>
   );

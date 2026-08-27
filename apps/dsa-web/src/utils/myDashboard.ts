@@ -85,6 +85,20 @@ export function addDashboardItem(item: Omit<DashboardItem, 'id' | 'addedAt'>): {
   return { added: true };
 }
 
+/** 用服务端看板整体覆盖本地（云同步：登录后拉取）。 */
+export function replaceAllDashboardItems(items: DashboardItem[]): void {
+  const safe = Array.isArray(items)
+    ? items.filter(
+        (item): item is DashboardItem =>
+          !!item &&
+          typeof item.id === 'string' &&
+          typeof item.code === 'string' &&
+          typeof item.chart === 'string',
+      )
+    : [];
+  saveDashboardItems(safe);
+}
+
 export function removeDashboardItem(id: string): void {
   saveDashboardItems(loadDashboardItems().filter((item) => item.id !== id));
 }

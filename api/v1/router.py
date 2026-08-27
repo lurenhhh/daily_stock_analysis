@@ -12,13 +12,16 @@ API v1 路由聚合
 from fastapi import APIRouter
 
 from api.v1.endpoints import (
+    account,
     agent,
     alerts,
     screening,
     analysis,
     auth,
     backtest,
+    checkup,
     decision_signals,
+    filings,
     health,
     history,
     intelligence,
@@ -37,6 +40,24 @@ router.include_router(
     auth.router,
     prefix="/auth",
     tags=["Auth"]
+)
+
+router.include_router(
+    account.router,
+    prefix="/account",
+    tags=["Account"]
+)
+
+router.include_router(
+    filings.router,
+    prefix="/filings",
+    tags=["Filings"]
+)
+
+router.include_router(
+    checkup.router,
+    prefix="/checkup",
+    tags=["Checkup"]
 )
 
 router.include_router(

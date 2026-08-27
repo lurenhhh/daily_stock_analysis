@@ -2,6 +2,7 @@ import type {
   FundamentalsResponse,
   MetricKey,
 } from '../../api/valuation';
+import type { DashboardChartKind } from '../../utils/myDashboard';
 import type { UiLanguage, UiTextKey, UiTextParams } from '../../i18n/uiText';
 
 export type Translate = (key: UiTextKey, params?: UiTextParams) => string;
@@ -89,4 +90,16 @@ export function fundUnitText(fundamentals: FundamentalsResponse | null, t: Trans
     return t('valuation.unitYi');
   }
   return `${fundamentals.unit || '亿'}${fundamentals.currency ? ` ${fundamentals.currency}` : ''}`;
+}
+
+/** 看板图表类型的展示标签（PE / 营收市值 / 各财务指标）。 */
+export function getChartKindLabel(chart: DashboardChartKind, t: Translate): string {
+  if (chart === 'pe') {
+    return getPeMetricLabel('pe_ttm', t);
+  }
+  if (chart === 'fund') {
+    return t('valuation.fundTitle');
+  }
+  const cfg = METRIC_CONFIG_BY_KEY[chart as MetricKey];
+  return cfg ? t(cfg.labelKey) : chart;
 }

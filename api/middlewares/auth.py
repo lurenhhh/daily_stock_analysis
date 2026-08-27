@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 EXEMPT_PATHS = frozenset({
     "/api/v1/auth/login",
     "/api/v1/auth/status",
+    "/api/v1/account/register",
+    "/api/v1/account/login",
+    "/api/v1/account/logout",
+    "/api/v1/account/me",
+    "/api/v1/account/dashboard",
+    "/api/v1/account/dossier",
     "/api/health",
     "/api/v1/health",
     "/health",

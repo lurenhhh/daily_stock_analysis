@@ -1290,6 +1290,46 @@ class SkillOpinionOutcomeRecord(Base):
     )
 
 
+class User(Base):
+    """L2-lite 多用户账号表（邮箱 + 密码哈希）。"""
+
+    __tablename__ = 'users'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    nickname = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class UserDashboard(Base):
+    """L2-lite 用户看板（整体存为一个 JSON blob，last-write-wins）。"""
+
+    __tablename__ = 'user_dashboard'
+
+    user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    data_json = Column(Text, nullable=False, default='[]')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class UserDossier(Base):
+    """L2 持仓纪律/投资底稿（整体存为一个 JSON blob，last-write-wins）。"""
+
+    __tablename__ = 'user_dossier'
+
+    user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    data_json = Column(Text, nullable=False, default='{}')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

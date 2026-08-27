@@ -8,6 +8,7 @@ import {
   StandaloneRouteBoundary,
 } from './components/layout/RouteBoundary';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { UserAccountProvider } from './contexts/UserAccountContext';
 import { UiLanguageProvider, useUiLanguage } from './contexts/UiLanguageContext';
 import { useAgentChatStore } from './stores/agentChatStore';
 import './App.css';
@@ -25,6 +26,10 @@ const TokenUsagePage = lazy(() => import('./pages/TokenUsagePage'));
 const StockScreeningPage = lazy(() => import('./pages/StockScreeningPage'));
 const ValuationPage = lazy(() => import('./pages/ValuationPage'));
 const MyDashboardPage = lazy(() => import('./pages/MyDashboardPage'));
+const FilingsPage = lazy(() => import('./pages/FilingsPage'));
+const CheckupPage = lazy(() => import('./pages/CheckupPage'));
+const HoldingDisciplinePage = lazy(() => import('./pages/HoldingDisciplinePage'));
+const HoldingDossierPage = lazy(() => import('./pages/HoldingDossierPage'));
 
 const AppContent: React.FC = () => {
   const location = useLocation();
@@ -84,6 +89,10 @@ const AppContent: React.FC = () => {
         <Route path="/" element={<HomePage />} />
         <Route path="/valuation" element={<ValuationPage />} />
         <Route path="/my-dashboard" element={<MyDashboardPage />} />
+        <Route path="/filings" element={<FilingsPage />} />
+        <Route path="/overview" element={<CheckupPage />} />
+        <Route path="/discipline" element={<HoldingDisciplinePage />} />
+        <Route path="/discipline/:holdingId" element={<HoldingDossierPage />} />
         <Route path="/chat" element={<ChatPage />} />
         <Route path="/portfolio" element={<PortfolioPage />} />
         <Route path="/decision-signals" element={<DecisionSignalsPage />} />
@@ -103,7 +112,9 @@ const App: React.FC = () => {
     <UiLanguageProvider>
       <Router>
         <AuthProvider>
-          <AppContent />
+          <UserAccountProvider>
+            <AppContent />
+          </UserAccountProvider>
         </AuthProvider>
       </Router>
     </UiLanguageProvider>

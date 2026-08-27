@@ -1,5 +1,6 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { Check, LineChart as LineChartIcon, Plus, RefreshCw, TrendingUp } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { Check, FileText, LineChart as LineChartIcon, Plus, RefreshCw, TrendingUp } from 'lucide-react';
 import {
   valuationApi,
   type FundamentalsResponse,
@@ -188,6 +189,20 @@ const ValuationPage: React.FC = () => {
     [activeCode, metric, runQuery],
   );
 
+  const [searchParams] = useSearchParams();
+  const deepLinkRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkRef.current) {
+      return;
+    }
+    deepLinkRef.current = true;
+    const qCode = searchParams.get('code');
+    if (qCode) {
+      setInputValue(qCode);
+      handleSubmit(qCode);
+    }
+  }, [searchParams, handleSubmit]);
+
   const stats = data?.stats ?? null;
 
   const headerTitle = useMemo(() => {
@@ -343,6 +358,15 @@ const ValuationPage: React.FC = () => {
                   <RefreshCw className={cn('h-4 w-4', loading ? 'animate-spin' : '')} />
                   {t('valuation.refresh')}
                 </button>
+              ) : null}
+              {activeCode ? (
+                <Link
+                  to={`/filings?code=${encodeURIComponent(activeCode)}`}
+                  className="btn-secondary inline-flex items-center gap-2"
+                >
+                  <FileText className="h-4 w-4" />
+                  {t('valuation.viewFilings')}
+                </Link>
               ) : null}
             </div>
           </div>

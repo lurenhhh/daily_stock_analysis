@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, BarChart3, Bell, BriefcaseBusiness, ChevronDown, Folder, Gauge, Home, LayoutDashboard, LogOut, MessageSquareQuote, Search, Settings2, TrendingUp } from 'lucide-react';
+import { Activity, BarChart3, Bell, BriefcaseBusiness, FileText, ShieldCheck, Stethoscope, ChevronDown, Folder, Gauge, Home, LayoutDashboard, LogOut, MessageSquareQuote, Search, Settings2, TrendingUp } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { SCREENING_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, screeningApi } from '../../api/screening';
 import { useAuth } from '../../contexts/AuthContext';
@@ -30,8 +30,11 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { key: 'home', labelKey: 'layout.nav.home', to: '/', icon: Home, exact: true },
+  { key: 'overview', labelKey: 'layout.nav.overview', to: '/overview', icon: Stethoscope, group: 'layout.navGroup.myAnalysis' },
   { key: 'valuation', labelKey: 'layout.nav.valuation', to: '/valuation', icon: TrendingUp, group: 'layout.navGroup.myAnalysis' },
   { key: 'my-dashboard', labelKey: 'layout.nav.myDashboard', to: '/my-dashboard', icon: LayoutDashboard, group: 'layout.navGroup.myAnalysis' },
+  { key: 'discipline', labelKey: 'layout.nav.discipline', to: '/discipline', icon: ShieldCheck, group: 'layout.navGroup.myAnalysis' },
+  { key: 'filings', labelKey: 'layout.nav.filings', to: '/filings', icon: FileText, group: 'layout.navGroup.myAnalysis' },
   { key: 'chat', labelKey: 'layout.nav.chat', to: '/chat', icon: MessageSquareQuote, badge: 'completion' },
   { key: 'screening', labelKey: 'layout.nav.screening', to: '/screening', icon: Search },
   { key: 'portfolio', labelKey: 'layout.nav.portfolio', to: '/portfolio', icon: BriefcaseBusiness },
