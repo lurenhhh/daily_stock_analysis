@@ -7,6 +7,7 @@ import {
   type MetricsResponse,
   type PeHistoryResponse,
   type SegmentRevenueResponse,
+  type KlineResponse,
   type ValuationMetric,
   type ValuationZone,
 } from '../api/valuation';
@@ -18,6 +19,8 @@ import { MilestoneTimeline } from '../components/valuation/MilestoneTimeline';
 import { LeadersPanel } from '../components/valuation/LeadersPanel';
 import { FundChart, MetricChartView, PeChart } from '../components/valuation/charts';
 import { SegmentRevenueChart } from '../components/valuation/SegmentRevenueChart';
+import { KlineChart } from '../components/valuation/KlineChart';
+import { ScreenPanel } from '../components/valuation/ScreenPanel';
 import {
   METRIC_CONFIG,
   buildFundData,
@@ -105,6 +108,7 @@ const ValuationPage: React.FC = () => {
   const [fundamentals, setFundamentals] = useState<FundamentalsResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [segments, setSegments] = useState<SegmentRevenueResponse | null>(null);
+  const [kline, setKline] = useState<KlineResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ParsedApiError | null>(null);
 
@@ -127,11 +131,12 @@ const ValuationPage: React.FC = () => {
     setError(null);
 
     try {
-      const [peResult, fundResult, metricsResult, segResult] = await Promise.allSettled([
+      const [peResult, fundResult, metricsResult, segResult, klineResult] = await Promise.allSettled([
         valuationApi.getPeHistory(trimmed, { metric: nextMetric, years: nextYears }, { signal: controller.signal }),
         valuationApi.getFundamentals(trimmed, { years: nextYears }, { signal: controller.signal }),
         valuationApi.getMetrics(trimmed, { years: nextYears }, { signal: controller.signal }),
         valuationApi.getSegmentRevenue(trimmed, { years: nextYears }, { signal: controller.signal }),
+        valuationApi.getKline(trimmed, {}, { signal: controller.signal }),
       ]);
       if (seq !== requestSeqRef.current) {
         return;
@@ -139,6 +144,7 @@ const ValuationPage: React.FC = () => {
       setFundamentals(fundResult.status === 'fulfilled' ? fundResult.value : null);
       setMetrics(metricsResult.status === 'fulfilled' ? metricsResult.value : null);
       setSegments(segResult.status === 'fulfilled' ? segResult.value : null);
+      setKline(klineResult.status === 'fulfilled' ? klineResult.value : null);
       if (peResult.status === 'fulfilled') {
         setData(peResult.value);
       } else {
@@ -190,17 +196,15 @@ const ValuationPage: React.FC = () => {
   );
 
   const [searchParams] = useSearchParams();
-  const deepLinkRef = useRef(false);
+  const lastDeepLinkRef = useRef<string | null>(null);
   useEffect(() => {
-    if (deepLinkRef.current) {
+    const qCode = searchParams.get('code');
+    if (!qCode || qCode === lastDeepLinkRef.current) {
       return;
     }
-    deepLinkRef.current = true;
-    const qCode = searchParams.get('code');
-    if (qCode) {
-      setInputValue(qCode);
-      handleSubmit(qCode);
-    }
+    lastDeepLinkRef.current = qCode;
+    setInputValue(qCode);
+    handleSubmit(qCode);
   }, [searchParams, handleSubmit]);
 
   const stats = data?.stats ?? null;
@@ -371,6 +375,18 @@ const ValuationPage: React.FC = () => {
             </div>
           </div>
         </Card>
+
+        <ScreenPanel pe={data} metrics={metrics} fundamentals={fundamentals} hasStock={Boolean(activeCode)} />
+
+        {!loading && kline && kline.supported && kline.items.length > 0 ? (
+          <Card className="rounded-2xl" padding="md">
+            <div className="mb-1 flex items-center gap-2">
+              <LineChartIcon className="h-5 w-5 text-cyan" />
+              <h3 className="text-lg font-semibold text-foreground">{t('valuation.klineTitle')}</h3>
+            </div>
+            <KlineChart data={kline.items} language={language} t={t} />
+          </Card>
+        ) : null}
 
         {error ? (
           <ApiErrorAlert

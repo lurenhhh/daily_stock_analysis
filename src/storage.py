@@ -1330,6 +1330,20 @@ class UserDossier(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 
+class ValuationCache(Base):
+    """估值取数的持久化懒缓存（key -> JSON payload + 时间戳）。
+
+    与 valuation endpoint 的进程内缓存共用同一 cache_key，命中即可跨重启复用，
+    并让批量筛选在预热后免于反复联网取数。payload 为 JSON 字符串。
+    """
+
+    __tablename__ = 'valuation_cache'
+
+    cache_key = Column(String(160), primary_key=True)
+    payload = Column(Text, nullable=False)
+    updated_at = Column(Float, nullable=False, index=True)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

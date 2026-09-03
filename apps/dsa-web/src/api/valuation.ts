@@ -188,6 +188,38 @@ export interface SegmentRevenueResponse {
   points: SegmentRevenuePoint[];
 }
 
+export interface KlinePoint {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface KlineResponse {
+  code: string;
+  displayCode: string;
+  market: string;
+  supported: boolean;
+  message: string | null;
+  items: KlinePoint[];
+}
+
+export interface ScreenPoolItem {
+  code: string;
+  name: string;
+}
+
+export interface ScreenPoolResponse {
+  pool: string;
+  name: string;
+  count: number;
+  supported: boolean;
+  message: string | null;
+  items: ScreenPoolItem[];
+}
+
 export const valuationApi = {
   /**
    * 获取个股历史 PE 走势与正态分布估值参考线。
@@ -300,5 +332,31 @@ export const valuationApi = {
       signal: options.signal,
     });
     return toCamelCase<SegmentRevenueResponse>(response.data);
+  },
+
+  /**
+   * 获取个股日 K 线（A股·前复权）。
+   */
+  getKline: async (
+    code: string,
+    params: { adjust?: string } = {},
+    options: GetPeHistoryOptions = {},
+  ): Promise<KlineResponse> => {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/kline', {
+      params: { code, adjust: params.adjust ?? 'qfq' },
+      signal: options.signal,
+    });
+    return toCamelCase<KlineResponse>(response.data);
+  },
+
+  getScreenPool: async (
+    pool: string,
+    options: GetPeHistoryOptions = {},
+  ): Promise<ScreenPoolResponse> => {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/valuation/screen-pool', {
+      params: { pool },
+      signal: options.signal,
+    });
+    return toCamelCase<ScreenPoolResponse>(response.data);
   },
 };

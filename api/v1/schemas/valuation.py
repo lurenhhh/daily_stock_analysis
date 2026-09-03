@@ -207,3 +207,43 @@ class SegmentRevenueResponse(BaseModel):
     message: Optional[str] = Field(None, description="补充说明")
     segments: List[str] = Field(default_factory=list, description="业务名列表")
     points: List[SegmentRevenuePoint] = Field(default_factory=list, description="按报告期升序")
+
+
+class KlinePoint(BaseModel):
+    """单个交易日 K 线（前复权）。"""
+
+    date: str = Field(..., description="交易日 YYYY-MM-DD")
+    open: float = Field(..., description="开盘")
+    high: float = Field(..., description="最高")
+    low: float = Field(..., description="最低")
+    close: float = Field(..., description="收盘")
+    volume: float = Field(0, description="成交量")
+
+
+class KlineResponse(BaseModel):
+    """个股日 K 线响应。"""
+
+    code: str = Field(..., description="规范化后的股票代码")
+    display_code: str = Field(..., description="展示代码")
+    market: str = Field(..., description="市场标签")
+    supported: bool = Field(..., description="该市场是否支持 K 线")
+    message: Optional[str] = Field(None, description="补充说明")
+    items: List[KlinePoint] = Field(default_factory=list, description="按日期升序")
+
+
+class ScreenPoolItem(BaseModel):
+    """筛选池中的单只股票。"""
+
+    code: str = Field(..., description="6 位股票代码")
+    name: str = Field("", description="股票名称")
+
+
+class ScreenPoolResponse(BaseModel):
+    """预置筛选池（指数成分股 / 自选）响应。"""
+
+    pool: str = Field(..., description="池标识：sse50 / hs300 / zz500 / watchlist")
+    name: str = Field(..., description="池名称")
+    count: int = Field(0, description="成分数量")
+    supported: bool = Field(True, description="是否成功取到成分股")
+    message: Optional[str] = Field(None, description="补充说明")
+    items: List[ScreenPoolItem] = Field(default_factory=list, description="成分股列表")

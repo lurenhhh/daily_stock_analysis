@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import statistics
@@ -30,7 +31,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.v1.schemas.valuation import (
     DcfReferenceResponse,
@@ -38,12 +39,16 @@ from api.v1.schemas.valuation import (
     Leader,
     LeaderEvent,
     LeadersResponse,
+    KlinePoint,
+    KlineResponse,
     MetricsResponse,
     MilestoneItem,
     MilestonesResponse,
     PeHistoryResponse,
     SegmentRevenuePoint,
     SegmentRevenueResponse,
+    ScreenPoolItem,
+    ScreenPoolResponse,
 )
 from data_provider.base import _market_tag, normalize_stock_code
 
@@ -58,6 +63,49 @@ _MAX_POINTS = 1500
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 6 * 3600
 _CACHE_LOCK = threading.Lock()
+
+# 持久化懒缓存（SQLite）：与进程内 _CACHE 共用 cache_key，命中即免联网，跨重启复用。
+_DB_TTL_SERIES = 24 * 3600          # PE 等含现值的序列：1 天
+_DB_TTL_META = 7 * 24 * 3600        # 年度指标 / 营收 / 市值：7 天
+
+
+def _db_cache_get(cache_key: str, ttl: float):
+    """从数据库读缓存 payload（dict），未命中或过期返回 None。"""
+    try:
+        from src.storage import DatabaseManager, ValuationCache
+
+        session = DatabaseManager.get_instance().get_session()
+        try:
+            row = session.get(ValuationCache, cache_key)
+            if row is None or (time.time() - float(row.updated_at)) >= ttl:
+                return None
+            return json.loads(row.payload)
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 - 缓存不可用不应影响主流程
+        logger.debug("valuation db cache get failed %s: %s", cache_key, exc)
+        return None
+
+
+def _db_cache_set(cache_key: str, payload: Dict[str, Any]) -> None:
+    """写入/更新数据库缓存 payload。"""
+    try:
+        from src.storage import DatabaseManager, ValuationCache
+
+        session = DatabaseManager.get_instance().get_session()
+        try:
+            text_val = json.dumps(payload, ensure_ascii=False)
+            row = session.get(ValuationCache, cache_key)
+            if row is None:
+                session.add(ValuationCache(cache_key=cache_key, payload=text_val, updated_at=time.time()))
+            else:
+                row.payload = text_val
+                row.updated_at = time.time()
+            session.commit()
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("valuation db cache set failed %s: %s", cache_key, exc)
 
 _SUPPORTED_MARKETS = {"cn", "hk", "us"}
 _VALID_METRICS = {"pe_ttm", "pe"}
@@ -209,10 +257,19 @@ def _load_full_series(market: str, code: str, metric: str) -> List[Tuple[str, fl
         if cached and now - cached[0] < _CACHE_TTL_SECONDS:
             return cached[1]["series"]
 
+    db_payload = _db_cache_get(cache_key, _DB_TTL_SERIES)
+    if db_payload is not None and db_payload.get("series"):
+        series = db_payload["series"]
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"series": series})
+        return series
+
     series = _fetch_series(market, code, metric)
 
     with _CACHE_LOCK:
         _CACHE[cache_key] = (now, {"series": series})
+    if series:
+        _db_cache_set(cache_key, {"series": series})
     return series
 
 
@@ -440,11 +497,21 @@ def _load_fundamentals(
             data = cached[1]
             return data["cap"], data["rev"]
 
+    db_payload = _db_cache_get(cache_key, _DB_TTL_META)
+    if db_payload is not None and db_payload.get("cap"):
+        cap = db_payload["cap"]
+        rev = db_payload.get("rev", [])
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"cap": cap, "rev": rev})
+        return cap, rev
+
     cap = _fetch_baidu(market, code, "总市值")  # 市值失败会抛出 -> 由上层转 502
     rev = _fetch_revenue(market, code)  # 营收失败内部吞掉，返回 []
 
     with _CACHE_LOCK:
         _CACHE[cache_key] = (now, {"cap": cap, "rev": rev})
+    if cap:
+        _db_cache_set(cache_key, {"cap": cap, "rev": rev})
     return cap, rev
 
 
@@ -736,6 +803,13 @@ def _load_metrics(market: str, code: str) -> Dict[str, List[Tuple[str, float]]]:
         if cached and now - cached[0] < _CACHE_TTL_SECONDS:
             return cached[1]["metrics"]
 
+    db_payload = _db_cache_get(cache_key, _DB_TTL_META)
+    if db_payload is not None and "metrics" in db_payload:
+        metrics = db_payload["metrics"]
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (now, {"metrics": metrics})
+        return metrics
+
     metrics: Dict[str, List[Tuple[str, float]]] = {}
     if market == "cn":
         import akshare as ak
@@ -761,6 +835,8 @@ def _load_metrics(market: str, code: str) -> Dict[str, List[Tuple[str, float]]]:
 
     with _CACHE_LOCK:
         _CACHE[cache_key] = (now, {"metrics": metrics})
+    if metrics:
+        _db_cache_set(cache_key, {"metrics": metrics})
     return metrics
 
 
@@ -1798,4 +1874,256 @@ def get_segment_revenue(
         message=ref.get("message"),
         segments=ref.get("segments", []),
         points=[SegmentRevenuePoint(**p) for p in ref.get("points", [])],
+    )
+
+
+def _load_kline(market: str, code: str, adjust: str) -> Dict[str, Any]:
+    """A 股日 K 线（新浪，前复权），带缓存，仅取近 ~6 年。"""
+    cache_key = f"kline:{market}:{normalize_stock_code(code).upper()}:{adjust}"
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]["ref"]
+
+    if market != "cn":
+        return {"supported": False, "items": [], "message": "该市场暂不支持 K 线"}
+
+    import akshare as ak
+
+    sina = _sina_symbol(code)
+    if not sina:
+        return {"supported": False, "items": [], "message": "无法识别股票代码"}
+    try:
+        df = ak.stock_zh_a_daily(symbol=sina, adjust=adjust or "qfq")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] kline failed for %s: %s", code, exc)
+        return {"supported": True, "items": [], "message": "K 线数据源暂不可用，请稍后重试"}
+    if df is None or getattr(df, "empty", True):
+        return {"supported": True, "items": [], "message": "暂无 K 线数据"}
+
+    cols = list(df.columns)
+    dcol = "date" if "date" in cols else cols[0]
+    items: List[Dict[str, Any]] = []
+    for _, r in df.iterrows():
+        try:
+            o = float(r.get("open"))
+            h = float(r.get("high"))
+            low = float(r.get("low"))
+            c = float(r.get("close"))
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(x) for x in (o, h, low, c)):
+            continue
+        try:
+            vol = float(r.get("volume") or 0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        items.append({
+            "date": str(r.get(dcol))[:10],
+            "open": round(o, 3),
+            "high": round(h, 3),
+            "low": round(low, 3),
+            "close": round(c, 3),
+            "volume": round(vol, 1),
+        })
+    items.sort(key=lambda x: x["date"])
+    items = [it for it in items if it["date"] >= "2000-01-01"]  # 2000 年至今
+    items = items[-8000:]  # 安全上限
+    ref = {"supported": True, "items": items, "message": None if items else "暂无 K 线数据"}
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = (now, {"ref": ref})
+    return ref
+
+
+@router.get(
+    "/kline",
+    response_model=KlineResponse,
+    summary="个股日 K 线（A股·新浪·前复权）",
+)
+def get_kline(
+    code: str = Query(..., description="股票代码或名称对应的代码"),
+    adjust: str = Query("qfq", description="复权：qfq / hfq / 空为不复权"),
+) -> KlineResponse:
+    raw_code = (code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=422, detail="请提供股票代码")
+    normalized = normalize_stock_code(raw_code)
+    market = _market_tag(normalized)
+    try:
+        ref = _load_kline(market, raw_code, adjust)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Valuation] kline endpoint failed for %s: %s", raw_code, exc)
+        raise HTTPException(status_code=502, detail="获取 K 线失败，请稍后重试") from exc
+    return KlineResponse(
+        code=normalized,
+        display_code=raw_code,
+        market=market,
+        supported=bool(ref.get("supported")),
+        message=ref.get("message"),
+        items=[KlinePoint(**it) for it in ref.get("items", [])],
+    )
+
+
+# ============================================================
+# 预置筛选池：指数成分股 / 自选，供估值筛选功能一键选取股票范围。
+# ============================================================
+
+_POOL_INDEX = {
+    "sse50": ("000016", "上证50"),
+    "hs300": ("000300", "沪深300"),
+    "zz500": ("000905", "中证500"),
+}
+_POOL_CACHE: Dict[str, Tuple[float, List[Dict[str, str]]]] = {}
+_POOL_CACHE_TTL = 24 * 3600
+_POOL_CACHE_LOCK = threading.Lock()
+
+
+def _fetch_index_cons(index_symbol: str) -> List[Dict[str, str]]:
+    """从新浪取指数成分股，返回 [{code,name}]。"""
+    import akshare as ak
+
+    df = ak.index_stock_cons(symbol=index_symbol)
+    items: List[Dict[str, str]] = []
+    if df is None or df.empty:
+        return items
+    cols = list(df.columns)
+    code_col = "品种代码" if "品种代码" in cols else cols[0]
+    name_col = "品种名称" if "品种名称" in cols else (cols[1] if len(cols) > 1 else cols[0])
+    for _, row in df.iterrows():
+        raw = str(row.get(code_col, "")).strip()
+        digits = "".join(ch for ch in raw if ch.isdigit())[:6]
+        if len(digits) != 6:
+            continue
+        items.append({"code": digits, "name": str(row.get(name_col, "")).strip()})
+    return items
+
+
+def _load_index_pool(pool: str) -> List[Dict[str, str]]:
+    index_symbol, _ = _POOL_INDEX[pool]
+    now = time.time()
+    with _POOL_CACHE_LOCK:
+        cached = _POOL_CACHE.get(pool)
+        if cached and now - cached[0] < _POOL_CACHE_TTL:
+            return cached[1]
+    items = _fetch_index_cons(index_symbol)
+    if items:
+        with _POOL_CACHE_LOCK:
+            _POOL_CACHE[pool] = (now, items)
+    return items
+
+
+_ALLA_CACHE: List[Dict[str, str]] = []
+_ALLA_CACHE_LOCK = threading.Lock()
+
+
+def _load_all_a_pool() -> List[Dict[str, str]]:
+    """从本地股票索引文件加载全部 A 股（沪深主板/创业板/科创板），无需联网。"""
+    with _ALLA_CACHE_LOCK:
+        if _ALLA_CACHE:
+            return _ALLA_CACHE
+    items: List[Dict[str, str]] = []
+    try:
+        from src.data.stock_index_loader import find_existing_stock_index_path
+
+        index_path = find_existing_stock_index_path()
+        if index_path is None:
+            return items
+        with open(index_path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        seen = set()
+        for e in raw:
+            # 每条形如 [ts_code, code, name, ..., region, type, enabled, weight]
+            if not isinstance(e, list) or len(e) < 8:
+                continue
+            code = str(e[1]).strip()
+            region = e[6]
+            kind = e[7]
+            if region != "CN" or kind != "stock":
+                continue
+            if not code.isdigit() or len(code) != 6:
+                continue
+            if code in seen:
+                continue
+            seen.add(code)
+            items.append({"code": code, "name": str(e[2]).strip()})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("加载全A股清单失败: %s", exc)
+        return items
+    items.sort(key=lambda it: it["code"])
+    if items:
+        with _ALLA_CACHE_LOCK:
+            _ALLA_CACHE[:] = items
+    return items
+
+
+@router.get(
+    "/screen-pool",
+    response_model=ScreenPoolResponse,
+    summary="获取预置筛选池成分股",
+    description="返回指数成分股（上证50/沪深300/中证500）或自选股的代码列表，供筛选功能使用。",
+)
+def get_screen_pool(
+    pool: str = Query("sse50", description="池标识：sse50 / hs300 / zz500 / watchlist"),
+    request: Request = None,
+) -> ScreenPoolResponse:
+    pool = (pool or "").strip().lower()
+
+    if pool in _POOL_INDEX:
+        _, name = _POOL_INDEX[pool]
+        try:
+            items = _load_index_pool(pool)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取指数成分股失败 pool=%s: %s", pool, e)
+            return ScreenPoolResponse(
+                pool=pool, name=name, count=0, supported=False,
+                message="成分股数据源暂不可用，请稍后再试。", items=[],
+            )
+        return ScreenPoolResponse(
+            pool=pool, name=name, count=len(items), supported=bool(items),
+            message=None if items else "未取到成分股。",
+            items=[ScreenPoolItem(code=it["code"], name=it["name"]) for it in items],
+        )
+
+    if pool == "alla":
+        try:
+            items = _load_all_a_pool()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取全A股失败: %s", e)
+            items = []
+        return ScreenPoolResponse(
+            pool="alla", name="全部A股", count=len(items), supported=bool(items),
+            message=None if items else "本地股票清单不可用。",
+            items=[ScreenPoolItem(code=it["code"], name=it["name"]) for it in items],
+        )
+
+    if pool == "watchlist":
+        try:
+            from api.deps import get_system_config_service
+            from api.v1.endpoints.stocks import _read_watchlist_codes
+
+            service = get_system_config_service(request)
+            raw_codes = _read_watchlist_codes(service)
+            items = []
+            seen = set()
+            for rc in raw_codes:
+                digits = "".join(ch for ch in normalize_stock_code(str(rc)) if ch.isdigit())[:6]
+                if len(digits) == 6 and digits not in seen:
+                    seen.add(digits)
+                    items.append({"code": digits, "name": ""})
+            return ScreenPoolResponse(
+                pool="watchlist", name="自选股", count=len(items), supported=True,
+                message=None if items else "自选股为空。",
+                items=[ScreenPoolItem(code=it["code"], name=it["name"]) for it in items],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取自选股失败: %s", e)
+            return ScreenPoolResponse(
+                pool="watchlist", name="自选股", count=0, supported=False,
+                message="读取自选股失败。", items=[],
+            )
+
+    return ScreenPoolResponse(
+        pool=pool or "unknown", name="未知池", count=0, supported=False,
+        message="未知的筛选池标识。", items=[],
     )
